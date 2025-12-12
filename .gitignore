@@ -1,0 +1,28 @@
+# CDK generated files
+cdk.out/
+.cdk.staging/
+
+# Node modules (thư viện tải về, rất nặng, không cần đưa lên)
+node_modules/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# IDE files (file cấu hình của trình soạn thảo code)
+.vscode/
+.idea/
+
+# Typescript generated files (file JS được biên dịch từ TS)
+*.js
+*.d.ts
+# Giữ lại file cấu hình gốc
+!jest.config.js
+!cdk.json
