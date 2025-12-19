@@ -20,7 +20,7 @@ export class TokyoSecurityStack extends cdk.Stack {
         });
 
         // 2. GuardDuty
-        new GuardDutyModule(this, 'GD', { regionId: 'Tokyo' });
+        new GuardDutyModule(this, 'GuardDuty', { regionId: 'Tokyo' });
 
         // 3. Config
         new ConfigModule(this, 'ConfigService', { 

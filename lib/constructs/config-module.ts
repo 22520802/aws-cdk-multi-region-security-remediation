@@ -18,9 +18,8 @@ export class ConfigModule extends Construct {
     const regionTag = props.regionId.toUpperCase();
     const accountId = cdk.Stack.of(this).account;
 
-    // --- 1. Tạo S3 Bucket để lưu trữ logs ---
+    // 1. S3
     this.bucket = new s3.Bucket(this, `ConfigBucket${regionTag}`, {
-      // ... các thuộc tính khác của bucket ...
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       encryption: s3.BucketEncryption.S3_MANAGED,
       enforceSSL: true,

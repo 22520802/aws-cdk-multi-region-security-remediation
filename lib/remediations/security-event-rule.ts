@@ -16,11 +16,13 @@ export class SecurityEventRule extends Construct {
             description: `Lambda Remediation findings EC2 ${props.regionTag}`,
             eventPattern: {
                 source: ['aws.securityhub'],
-                detailType: ['Security Hub Findings - Imported'],
+                detailType: ['Findings Imported V2'],
                 detail: {
-                    "Workflow": { "Status": ["NEW"] },
-                    "Severity": { "Label": ["HIGH", "CRITICAL"] },
-                    "Resources": { "Type": ["AwsEc2Instance"] }
+                    findings: {
+                        resources: {type: ["AWS::EC2::Instance"]},
+                        severity: ['High', 'Critical'],
+                        status: ['New']
+                    }
                 }
             },
         });
@@ -28,3 +30,4 @@ export class SecurityEventRule extends Construct {
         securityHubRule.addTarget(new targets.LambdaFunction(props.targetLambda));
     }
 }
+
