@@ -8,7 +8,6 @@ export class ConfigRoleConstruct extends Construct {
         super(scope, id);
         const region = cdk.Stack.of(this).region.toUpperCase();
         this.role = new iam.Role(this, 'ConfigServiceRole', {
-            roleName: `Shared-Security-Config-Role-${region}`,
             assumedBy: new iam.ServicePrincipal('config.amazonaws.com'),
             managedPolicies: [
                 iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWS_ConfigRole'),
@@ -25,7 +24,6 @@ export class RemediationLambdaRoleConstruct extends Construct {
         const region = cdk.Stack.of(this).region.toUpperCase();
 
         this.role = new iam.Role(this, 'LambdaRole', {
-            roleName: `Remediation-Lambda-Role-${region}`,
             assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
         });
 
@@ -37,8 +35,11 @@ export class RemediationLambdaRoleConstruct extends Construct {
             sid: 'EC2RemediationActions',
             actions: [
                 'ec2:DescribeInstances',
-                'ec2:ModifyInstanceAttribute',        
-                'ec2:StopInstances'                   
+                'ec2:ModifyInstanceAttribute',
+                'ssm:DescribeSessions',
+                'ssm:TerminateSession',
+                'iam:PutRolePolicy',
+                'iam:GetRole'                
             ],
             resources: ['*'],
         }));
@@ -53,6 +54,7 @@ export class RemediationLambdaRoleConstruct extends Construct {
             sid: 'SecurityHubUpdate',
             actions: [
                 'securityhub:BatchUpdateFindings',
+                'securityhub:BatchUpdateFindingsV2',
                 'securityhub:GetFindings'
             ],
             resources: ['*'],

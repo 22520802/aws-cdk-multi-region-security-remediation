@@ -47,14 +47,33 @@ export class TokyoEC2Stack extends cdk.Stack {
         });
 
         // 5. IAM ROLE CHO EC2
-        new iam.Role(this, `EC2SSMRole${regionTag}`, {
+        const ec2Role = new iam.Role(this, `EC2SSMRole${regionTag}`, {
             assumedBy: new iam.ServicePrincipal('ec2.amazonaws.com'),
             managedPolicies: [
                 iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonSSMManagedInstanceCore'),
             ],
         });
         
+        // // 5.5 EC2 INSTANCE TEST
+        const ec2Instance = new ec2.Instance(this, `TestInstance${regionTag}`, {
+            instanceName: `Victim-EC2-${regionTag}`,
+            vpc: vpc,
+            instanceType: ec2.InstanceType.of(ec2.InstanceClass.T3, ec2.InstanceSize.MICRO),
+            machineImage: ec2.MachineImage.latestAmazonLinux2023(),
+            securityGroup: instanceSG,
+            role: ec2Role,
+            vpcSubnets: {
+                subnetType: ec2.SubnetType.PUBLIC,
+            },
+            associatePublicIpAddress: true,
+        });
+
         // 6. OUTPUTS 
+        new cdk.CfnOutput(this, `InstanceIdOutput${regionTag}`, {
+            value: ec2Instance.instanceId,
+            description: `The ID of the Test EC2 Instance in ${regionTag}`,
+        });
+
         new cdk.CfnOutput(this, `VpcIdOutput${regionTag}`, {
             value: vpc.vpcId,
             exportName: `${regionTag}-VpcId`, 

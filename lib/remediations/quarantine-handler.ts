@@ -1,10 +1,8 @@
 import { PublishCommand, SNSClient } from '@aws-sdk/client-sns';
-import {
-    SecurityHubClient,
-    BatchUpdateFindingsV2Command,
-} from '@aws-sdk/client-securityhub';
-import { EC2Client, ModifyInstanceAttributeCommand } from '@aws-sdk/client-ec2';
-import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
+import { SecurityHubClient, BatchUpdateFindingsV2Command } from '@aws-sdk/client-securityhub';
+import { EC2Client, ModifyInstanceAttributeCommand, DescribeInstancesCommand } from '@aws-sdk/client-ec2';
+import { IAMClient, PutRolePolicyCommand } from '@aws-sdk/client-iam';
+import { SSMClient, GetParameterCommand, TerminateSessionCommand, DescribeSessionsCommand } from '@aws-sdk/client-ssm';
 
 const SNS_TOPIC_ARN = process.env.SNS_TOPIC_ARN;
 const snsClient = new SNSClient({});

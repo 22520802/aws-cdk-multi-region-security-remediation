@@ -29,7 +29,7 @@ export class SingaporeSecurityStack extends cdk.Stack {
         new ConfigModule(this, 'ConfigService', { configRole: configRole, regionId: 'Singapore' });
         new InspectorModule(this, 'Inspector', { regionId: 'Singapore' });
 
-        // 3. Aggregator (Gộp findings từ Tokyo về đây)
+        // 3. Aggregator 
         const aggregatorResource = new securityhub.CfnAggregatorV2(this, 'CrossRegionAggregator', {
             linkedRegions: ['ap-northeast-1'],
             regionLinkingMode: 'SPECIFIED_REGIONS',
@@ -39,7 +39,7 @@ export class SingaporeSecurityStack extends cdk.Stack {
         // 4. SNS
         const securityTopic = new SecurityTopic(this, 'SecurityNotification', {
             topicName: `Security-Alerts-${regionTag}`,
-            alertEmail: 'teloxi9974@mucate.com',
+            alertEmail: 'fidigos379@mekuron.com',
         });
 
         // 5. Lambda Remediation
@@ -55,7 +55,8 @@ export class SingaporeSecurityStack extends cdk.Stack {
                 'SNS_TOPIC_ARN': securityTopic.topic.topicArn,
             },
         });
-        
+        securityTopic.topic.grantPublish(remediationLambda);
+
         // 6. EventBridge Rule
         new SecurityEventRule(this, 'RemediationTrigger', {
             targetLambda: remediationLambda, 
