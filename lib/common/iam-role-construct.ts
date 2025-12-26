@@ -39,6 +39,7 @@ export class RemediationLambdaRoleConstruct extends Construct {
                 'ssm:DescribeSessions',
                 'ssm:TerminateSession',
                 'iam:PutRolePolicy',
+                'iam:GetInstanceProfile',
                 'iam:GetRole'                
             ],
             resources: ['*'],
