@@ -17,10 +17,8 @@ export const handler = async (event: any): Promise<void> => {
         let remediationLog = "";
 
         for (const finding of findings) {
-            // Lấy Region chuẩn từ OCSF cloud object
+            // Region
             const region = finding.cloud?.region || "ap-southeast-1";
-
-            // DUYỆT TẤT CẢ TÀI NGUYÊN TRONG DANH SÁCH (Vì đây là chuỗi tấn công nhiều máy)
             if (finding.resources && Array.isArray(finding.resources)) {
                 for (const resource of finding.resources) {
                     const resourceId = resource.uid;
@@ -29,13 +27,13 @@ export const handler = async (event: any): Promise<void> => {
                     if (resourceType === 'AWS::EC2::Instance' && resourceId) {
                         console.log(`[ACTION] Processing remediation for: ${resourceId} in ${region}`);
                         
-                        // 1. Cách ly Network
+                        // 1. Network
                         await quarantineInstance(resourceId, region);
                         
-                        // 2. Thu hồi SSM Sessions
+                        // 2. SSM Sessions
                         const ssmCount = await terminateSSMSessions(resourceId, region);
                         
-                        // 3. Khóa IAM Role (Tự tìm Role Name từ InstanceID)
+                        // 3. IAM Role
                         await revokeIAMForInstance(resourceId, region);
 
                         remediationLog += `- Remediation applied to: ${resourceId} (Sessions terminated: ${ssmCount})\n`;
@@ -43,7 +41,7 @@ export const handler = async (event: any): Promise<void> => {
                 }
             }
 
-            // Mapping định danh để update Security Hub
+            // Mapping Update Security Hub
             ocsfIdentifiers.push({
                 CloudAccountUid: finding.cloud?.account?.uid,
                 FindingInfoUid: finding.finding_info?.uid,
@@ -61,7 +59,7 @@ export const handler = async (event: any): Promise<void> => {
             await securityHubClient.send(new BatchUpdateFindingsV2Command({
                 FindingIdentifiers: ocsfIdentifiers,
                 Comment: "Automated quarantine and session revocation for all instances in sequence.",
-                StatusId: 2, // RESOLVED
+                StatusId: 2, 
             }));
         }
 
@@ -70,8 +68,6 @@ export const handler = async (event: any): Promise<void> => {
         throw error;
     }
 };
-
-// --- CÁC HÀM HỖ TRỢ (GIỮ NGUYÊN LOGIC AN TOÀN NHẤT) ---
 
 async function quarantineInstance(instanceId: string, region: string) {
     const ssmClient = new SSMClient({ region });
