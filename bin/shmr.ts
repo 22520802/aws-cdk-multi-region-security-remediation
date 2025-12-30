@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import 'source-map-support/register';
 import * as cdk from 'aws-cdk-lib';
 import { TokyoSecurityStack } from '../lib/stacks/tokyo-stack'; 
 import { SingaporeSecurityStack } from '../lib/stacks/singapore-stack';
@@ -7,24 +8,27 @@ import { SingaporeEC2Stack } from '../lib/stacks/singapore-ec2';
 
 const app = new cdk.App();
 
-// Singapore region stack (Aggregator)
-new SingaporeSecurityStack(app, 'SingaporeSecurityStack', {
-    env: { region: 'ap-southeast-1' }
-});
-
-// Tokyo region stack
-new TokyoSecurityStack(app, 'TokyoSecurityStack', {
+// 1. Tokyo Security Stack
+const tokyoSecurity = new TokyoSecurityStack(app, 'TokyoSecurityStack', {
     env: { region: 'ap-northeast-1' }
 });
 
-// Singapore region demo stack
-new SingaporeEC2Stack(app, 'SingaporeEC2Stack', {
-    env: { region: 'ap-southeast-1' },
-    regionName: 'Singapore',
+// 2. Singapore Security Stack
+const singaporeSecurity = new SingaporeSecurityStack(app, 'SingaporeSecurityStack', {
+    env: { region: 'ap-southeast-1' }
 });
+singaporeSecurity.addDependency(tokyoSecurity);
 
-// Tokyo region demo stack
-new TokyoEC2Stack(app, 'TokyoEC2Stack', {
+// 3. Tokyo EC2 Stack
+const tokyoEC2 = new TokyoEC2Stack(app, 'TokyoEC2Stack', {
     env: { region: 'ap-northeast-1' },
     regionName: 'Tokyo',
 });
+tokyoEC2.addDependency(singaporeSecurity);
+
+// 4. Singapore EC2 Stack
+const singaporeEC2 = new SingaporeEC2Stack(app, 'SingaporeEC2Stack', {
+    env: { region: 'ap-southeast-1' },
+    regionName: 'Singapore',
+});
+singaporeEC2.addDependency(tokyoEC2);

@@ -6,13 +6,16 @@ interface InspectorModuleProps {
     regionId: string;
 }
 
+/**
+ * Setup Amazon Inspector V2 for continuous vulnerability scanning
+ */
 export class InspectorModule extends Construct {
     constructor(scope: Construct, id: string, props: InspectorModuleProps) {
         super(scope, id);
         
         const regionTag = props.regionId.toUpperCase();
         
-        //1. Inspector V2
+        // Enable Inspector V2 for EC2, ECR, and Lambda resources
         new cr.AwsCustomResource(
             this,
             `InspectorV2${regionTag}`,

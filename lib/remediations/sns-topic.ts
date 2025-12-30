@@ -8,6 +8,9 @@ interface SecurityTopicProps {
     readonly alertEmail?: string;
 }
 
+/**
+ * SNS Topic for centralized security alerts
+ */
 export class SecurityTopic extends Construct {
     public readonly topic: sns.ITopic;
 
@@ -19,6 +22,7 @@ export class SecurityTopic extends Construct {
             displayName: 'Security Hub Automated Alerts',
         });
         
+        // Allow EventBridge and Lambda to publish alerts
         securityTopic.addToResourcePolicy(
             new iam.PolicyStatement({
                 actions: ['sns:Publish'],
@@ -30,6 +34,7 @@ export class SecurityTopic extends Construct {
             }),
         );
 
+        // Optional email subscription for security notifications
         if (props.alertEmail) {
             securityTopic.addSubscription(new subs.EmailSubscription(props.alertEmail));
         }
