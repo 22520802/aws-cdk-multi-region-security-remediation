@@ -42,7 +42,7 @@ export class SingaporeSecurityStack extends cdk.Stack {
         // Centralized SNS topic for security alerts
         const securityTopic = new SecurityTopic(this, 'SecurityNotification', {
             topicName: `Security-Alerts-${regionTag}`,
-            alertEmail: 'jisan33351@emaxasp.com',
+            alertEmail: 'dosos86927@gavrom.com',
         });
 
         // Lambda function for automated forensics and instance isolation

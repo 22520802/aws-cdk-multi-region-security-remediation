@@ -17,18 +17,15 @@ const tokyoSecurity = new TokyoSecurityStack(app, 'TokyoSecurityStack', {
 const singaporeSecurity = new SingaporeSecurityStack(app, 'SingaporeSecurityStack', {
     env: { region: 'ap-southeast-1' }
 });
-singaporeSecurity.addDependency(tokyoSecurity);
 
 // 3. Tokyo EC2 Stack
 const tokyoEC2 = new TokyoEC2Stack(app, 'TokyoEC2Stack', {
     env: { region: 'ap-northeast-1' },
     regionName: 'Tokyo',
 });
-tokyoEC2.addDependency(singaporeSecurity);
 
 // 4. Singapore EC2 Stack
 const singaporeEC2 = new SingaporeEC2Stack(app, 'SingaporeEC2Stack', {
     env: { region: 'ap-southeast-1' },
     regionName: 'Singapore',
 });
-singaporeEC2.addDependency(tokyoEC2);

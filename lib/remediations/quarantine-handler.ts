@@ -1,6 +1,13 @@
 import { PublishCommand, SNSClient } from '@aws-sdk/client-sns';
 import { SecurityHubClient, BatchUpdateFindingsV2Command } from '@aws-sdk/client-securityhub';
-import { EC2Client, ModifyInstanceAttributeCommand, DescribeInstancesCommand } from '@aws-sdk/client-ec2';
+import { 
+    EC2Client, 
+    ModifyInstanceAttributeCommand, 
+    DescribeInstancesCommand, 
+    DescribeIamInstanceProfileAssociationsCommand, 
+    DisassociateIamInstanceProfileCommand,
+    StopInstancesCommand // Thêm lệnh Stop
+} from '@aws-sdk/client-ec2';
 import { IAMClient, PutRolePolicyCommand, GetInstanceProfileCommand } from '@aws-sdk/client-iam';
 import { 
     SSMClient, 
@@ -8,8 +15,7 @@ import {
     TerminateSessionCommand, 
     DescribeSessionsCommand, 
     SendCommandCommand, 
-    GetCommandInvocationCommand,
-    GetCommandInvocationCommandOutput 
+    GetCommandInvocationCommand 
 } from '@aws-sdk/client-ssm';
 
 const SNS_TOPIC_ARN = process.env.SNS_TOPIC_ARN;
@@ -46,17 +52,23 @@ export const handler = async (event: any): Promise<void> => {
                             continue;
                         }
 
-                        // Execute memory forensics
+                        // 1. Dump Memory (Bằng chứng quan trọng nhất)
                         await runForensicsWorkflow(resourceId, region, bucketName);
 
-                        // Execute network isolation
+                        // 2. Cô lập mạng
                         await quarantineNetwork(resourceId, region);
 
-                        // Cleanup sessions and revoke permissions
+                        // 3. Thu hồi quyền IAM & Xóa Sessions
                         const ssmCount = await terminateSSMSessions(resourceId, region);
                         await revokeIAMForInstance(resourceId, region);
 
-                        remediationLog += `- Success: ${resourceId}\n  + Memory Dump: Captured\n  + Security: Isolated\n  + Sessions: ${ssmCount} terminated\n`;
+                        // 4. Gỡ bỏ IAM Role khỏi Instance
+                        await detachIAMRole(resourceId, region);
+
+                        // 5. Tắt máy (Stop Instance) - BƯỚC CUỐI CÙNG
+                        await stopInstance(resourceId, region);
+
+                        remediationLog += `- Success: ${resourceId}\n  + Memory Dump: Captured\n  + Security: Isolated\n  + IAM Role: Detached\n  + State: Stopped\n`;
                     }
                 }
             }
@@ -77,7 +89,7 @@ export const handler = async (event: any): Promise<void> => {
 
             await securityHubClient.send(new BatchUpdateFindingsV2Command({
                 FindingIdentifiers: ocsfIdentifiers,
-                Comment: "Automated remediation: Forensics captured and network isolated",
+                Comment: "Automated remediation: Forensics captured, role detached, and instance stopped",
                 StatusId: 2,
             }));
         }
@@ -96,23 +108,14 @@ async function runForensicsWorkflow(instanceId: string, region: string, bucketNa
 
     const forensicsScript = [
         "set -e",
-        "echo 'Downloading AVML'",
         "sudo curl -sL -o /usr/local/bin/avml https://github.com/microsoft/avml/releases/download/v0.14.0/avml",
         "sudo chmod +x /usr/local/bin/avml",
-        
-        "echo 'Capturing memory'",
         "sudo mkdir -p /data-forensics && cd /data-forensics",
         "sudo /usr/local/bin/avml --source /proc/kcore --compress mem.raw.xz || sudo /usr/local/bin/avml --compress mem.raw.xz",
-        
-        "echo 'Uploading to S3'",
-        "if ! command -v aws &> /dev/null; then sudo yum install -y aws-cli || sudo apt-get install -y awscli; fi",
         `sudo aws s3 cp mem.raw.xz s3://${bucketName}/forensics/${instanceId}/$(date +%Y%m%d_%H%M%S)_mem.raw.xz`,
-        
-        "echo 'Cleaning local files'",
         "cd / && sudo rm -rf /data-forensics"
     ];
 
-    console.log(`Executing forensics: ${instanceId}`);
     const ssmResponse = await ssmClient.send(new SendCommandCommand({
         InstanceIds: [instanceId],
         DocumentName: "AWS-RunShellScript",
@@ -127,42 +130,25 @@ async function runForensicsWorkflow(instanceId: string, region: string, bucketNa
         await new Promise(r => setTimeout(r, 7000));
         const inv = await ssmClient.send(new GetCommandInvocationCommand({ CommandId: commandId, InstanceId: instanceId }));
         status = inv.Status || 'Failed';
-        if (status === 'Failed') {
-            console.error(`SSM Error: ${inv.StandardErrorContent}`);
-            throw new Error(`Forensics failed: ${inv.StandardErrorContent}`);
-        }
+        if (status === 'Failed') throw new Error(`Forensics failed`);
     }
-    console.log(`Forensics upload success`);
 }
 
 /**
- * Network isolation by swapping Security Groups
+ * Network isolation
  */
 async function quarantineNetwork(instanceId: string, region: string) {
     const ssmClient = new SSMClient({ region });
     const ec2Client = new EC2Client({ region });
-
-    console.log(`Isolating network: ${instanceId}`);
-
-    const getParam = await ssmClient.send(new GetParameterCommand({ 
-        Name: '/security/quarantine-sg-id' 
-    }));
+    const getParam = await ssmClient.send(new GetParameterCommand({ Name: '/security/quarantine-sg-id' }));
     const quarantineSgId = getParam.Parameter?.Value;
-
-    if (!quarantineSgId) {
-        throw new Error("Quarantine SG ID missing in Parameter Store");
+    if (quarantineSgId) {
+        await ec2Client.send(new ModifyInstanceAttributeCommand({ InstanceId: instanceId, Groups: [quarantineSgId] }));
     }
-
-    await ec2Client.send(new ModifyInstanceAttributeCommand({
-        InstanceId: instanceId,
-        Groups: [quarantineSgId]
-    }));
-
-    console.log(`Network isolation success`);
 }
 
 /**
- * Terminate active SSM sessions
+ * Cleanup sessions
  */
 async function terminateSSMSessions(instanceId: string, region: string): Promise<number> {
     const ssmClient = new SSMClient({ region });
@@ -174,12 +160,12 @@ async function terminateSSMSessions(instanceId: string, region: string): Promise
             await ssmClient.send(new TerminateSessionCommand({ SessionId: session.SessionId! }));
             count++;
         }
-    } catch (e) { console.error("Session cleanup error:", e); }
+    } catch (e) { console.error("Session error:", e); }
     return count;
 }
 
 /**
- * Revoke IAM permissions by attaching inline deny policy
+ * Revoke IAM
  */
 async function revokeIAMForInstance(instanceId: string, region: string) {
     const ec2Client = new EC2Client({ region });
@@ -195,18 +181,46 @@ async function revokeIAMForInstance(instanceId: string, region: string) {
                 const revokePolicy = {
                     Version: "2012-10-17",
                     Statement: [{
-                        Effect: "Deny", 
-                        Action: "*", 
-                        Resource: "*",
+                        Effect: "Deny", Action: "*", Resource: "*",
                         Condition: { DateLessThan: { "aws:TokenIssueTime": new Date().toISOString() } }
                     }]
                 };
                 await iamClient.send(new PutRolePolicyCommand({
-                    RoleName: roleName, 
-                    PolicyName: 'ASL-Revoke-Sessions', 
-                    PolicyDocument: JSON.stringify(revokePolicy)
+                    RoleName: roleName, PolicyName: 'ASL-Revoke-Sessions', PolicyDocument: JSON.stringify(revokePolicy)
                 }));
             }
         }
     } catch (e) { console.error("IAM revoke error:", e); }
+}
+
+/**
+ * Detach IAM Role
+ */
+async function detachIAMRole(instanceId: string, region: string) {
+    const ec2Client = new EC2Client({ region });
+    try {
+        const associations = await ec2Client.send(new DescribeIamInstanceProfileAssociationsCommand({
+            Filters: [{ Name: 'instance-id', Values: [instanceId] }]
+        }));
+        const associationId = associations.IamInstanceProfileAssociations?.[0]?.AssociationId;
+        if (associationId) {
+            await ec2Client.send(new DisassociateIamInstanceProfileCommand({ AssociationId: associationId }));
+        }
+    } catch (e) { console.error("Detach error:", e); }
+}
+
+/**
+ * Stop Instance (The Final Lockdown)
+ */
+async function stopInstance(instanceId: string, region: string) {
+    const ec2Client = new EC2Client({ region });
+    try {
+        console.log(`Stopping instance: ${instanceId}`);
+        await ec2Client.send(new StopInstancesCommand({
+            InstanceIds: [instanceId]
+        }));
+        console.log(`Instance ${instanceId} stopped successfully.`);
+    } catch (e) {
+        console.error("Stop instance error:", e);
+    }
 }

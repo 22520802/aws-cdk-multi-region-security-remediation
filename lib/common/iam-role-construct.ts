@@ -43,6 +43,9 @@ export class RemediationLambdaRoleConstruct extends Construct {
         this.role.addToPolicy(new iam.PolicyStatement({
             sid: 'EC2RemediationActions',
             actions: [
+                'ec2:StopInstances',
+                'ec2:DescribeIamInstanceProfileAssociations',
+                'ec2:DisassociateIamInstanceProfile',
                 'ec2:DescribeInstances',
                 'ec2:ModifyInstanceAttribute', // Used for Security Group swapping
                 'ssm:DescribeSessions',
