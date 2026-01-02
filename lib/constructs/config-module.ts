@@ -10,9 +10,6 @@ interface ConfigModuleProps {
   regionId: string; 
 }
 
-/**
- * Setup AWS Config and centralized S3 storage for logs and forensics
- */
 export class ConfigModule extends Construct {
   public readonly bucket: s3.Bucket;
 
@@ -22,7 +19,6 @@ export class ConfigModule extends Construct {
     const regionTag = props.regionId.toUpperCase();
     const accountId = cdk.Stack.of(this).account;
 
-    // S3 Bucket for AWS Config logs and Forensic RAM dumps
     this.bucket = new s3.Bucket(this, `ConfigBucket${regionTag}`, {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       encryption: s3.BucketEncryption.S3_MANAGED,
@@ -32,14 +28,20 @@ export class ConfigModule extends Construct {
       autoDeleteObjects: false,
     });
 
-    // Store bucket name in SSM for automated remediation discovery
+    // 1. Lưu Bucket Name cho Lambda (Đã có sẵn)
     new ssm.StringParameter(this, `ForensicsBucketParam${regionTag}`, {
       parameterName: `/security/forensics-bucket-name`,
       stringValue: this.bucket.bucketName,
       description: `Target S3 bucket for forensics and Config logs in ${props.regionId}`,
     });
 
-    // Grant AWS Config service role permissions to write to the bucket
+    // 2. MỚI: Lưu Bucket ARN vào SSM để truyền giữa các Stack thay vì Export
+    new ssm.StringParameter(this, `ConfigBucketArnParam${regionTag}`, {
+      parameterName: `/security/config-bucket-arn-${props.regionId}`,
+      stringValue: this.bucket.bucketArn,
+      description: `Bucket ARN for forensics cross-stack reference in ${props.regionId}`,
+    });
+
     props.configRole.addToPrincipalPolicy(
         new iam.PolicyStatement({
             effect: iam.Effect.ALLOW,
@@ -51,7 +53,6 @@ export class ConfigModule extends Construct {
         })
     );
     
-    // Resource policy to allow AWS Config to check bucket status
     this.bucket.addToResourcePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
@@ -64,7 +65,6 @@ export class ConfigModule extends Construct {
       })
     );
     
-    // Resource policy to allow AWS Config to deliver log files
     this.bucket.addToResourcePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
@@ -83,7 +83,6 @@ export class ConfigModule extends Construct {
       })
     );
 
-    // Delivery Channel to define data delivery destination
     const deliveryChannel = new config.CfnDeliveryChannel(this, `DeliveryChannel${regionTag}`, {
       s3BucketName: this.bucket.bucketName,
       s3KeyPrefix: 'aws-config',
@@ -93,7 +92,6 @@ export class ConfigModule extends Construct {
     });
     deliveryChannel.node.addDependency(this.bucket);
 
-    // Configuration Recorder to track resource changes
     const recorder = new config.CfnConfigurationRecorder(this, `Recorder${regionTag}`, {
       roleArn: props.configRole.roleArn,
       recordingGroup: {
@@ -103,10 +101,9 @@ export class ConfigModule extends Construct {
     });
     recorder.node.addDependency(props.configRole);
 
-    // Output bucket ARN for cross-stack reference
+    // XÓA exportName để gỡ bỏ khóa cứng CloudFormation
     new cdk.CfnOutput(this, `ConfigBucketArn${regionTag}`, {
         value: this.bucket.bucketArn,
-        exportName: `ConfigBucketArn-${props.regionId}`,
     });
   }
 }

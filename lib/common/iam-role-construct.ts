@@ -65,7 +65,11 @@ export class RemediationLambdaRoleConstruct extends Construct {
         this.role.addToPolicy(new iam.PolicyStatement({
             sid: 'SSMReadParameter',
             actions: ['ssm:GetParameter'],
-            resources: [`arn:aws:ssm:*:*:parameter/security/quarantine-sg-id`],
+            resources: [
+                `arn:aws:ssm:*:*:parameter/security/quarantine-sg-id`,
+                `arn:aws:ssm:*:*:parameter/security/forensics-bucket-name`,
+                `arn:aws:ssm:*:*:parameter/security/config-bucket-arn-*`    
+            ],
         }));
 
         // Permission to update Security Hub finding status to RESOLVED

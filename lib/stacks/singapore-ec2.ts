@@ -9,7 +9,8 @@ interface SingaporeEC2StackProps extends cdk.StackProps {
 }
 
 /**
- * Stack for EC2 workload and network isolation infrastructure
+ * Stack for EC2 workload and network isolation infrastructure in Singapore.
+ * Features: VPC Endpoints for private forensics & UserData for AVML pre-installation.
  */
 export class SingaporeEC2Stack extends cdk.Stack {
     constructor(scope: Construct, id: string, props: SingaporeEC2StackProps) {
@@ -17,10 +18,13 @@ export class SingaporeEC2Stack extends cdk.Stack {
 
         const regionTag = props.regionName.toUpperCase();
 
-        // Import centralized forensics bucket ARN from ConfigModule export
-        const bucketArn = cdk.Fn.importValue(`ConfigBucketArn-${props.regionName}`);
+        // 1. Fetch forensics bucket ARN from SSM (Decoupled reference)
+        const bucketArn = ssm.StringParameter.valueForStringParameter(
+            this, 
+            `/security/config-bucket-arn-${props.regionName}`
+        );
 
-        // VPC with SSM and S3 Endpoints for secure private communication
+        // 2. VPC Configuration
         const vpc = new ec2.Vpc(this, `Vpc${regionTag}`, {
             maxAzs: 2, 
             ipAddresses: ec2.IpAddresses.cidr('10.1.0.0/16'),
@@ -28,17 +32,27 @@ export class SingaporeEC2Stack extends cdk.Stack {
             natGateways: 1, 
         });
 
-        // vpc.addInterfaceEndpoint(`SSMEndpoint${regionTag}`, {
-        //     service: ec2.InterfaceVpcEndpointAwsService.SSM,
-        // });
-        // vpc.addInterfaceEndpoint(`SSMMessagesEndpoint${regionTag}`, {
-        //     service: ec2.InterfaceVpcEndpointAwsService.SSM_MESSAGES,
-        // });
-        // vpc.addGatewayEndpoint(`S3Endpoint${regionTag}`, {
-        //     service: ec2.GatewayVpcEndpointAwsService.S3,
-        // });
+        // 3. VPC Endpoints: Allows private communication even when quarantined
+        vpc.addGatewayEndpoint(`S3Endpoint${regionTag}`, {
+            service: ec2.GatewayVpcEndpointAwsService.S3,
+        });
 
-        // Default Security Group for web traffic
+        vpc.addInterfaceEndpoint(`SSMEndpoint${regionTag}`, {
+            service: ec2.InterfaceVpcEndpointAwsService.SSM,
+            privateDnsEnabled: true,
+        });
+
+        vpc.addInterfaceEndpoint(`SSMMessagesEndpoint${regionTag}`, {
+            service: ec2.InterfaceVpcEndpointAwsService.SSM_MESSAGES,
+            privateDnsEnabled: true,
+        });
+
+        vpc.addInterfaceEndpoint(`Ec2MessagesEndpoint${regionTag}`, {
+            service: ec2.InterfaceVpcEndpointAwsService.EC2_MESSAGES,
+            privateDnsEnabled: true,
+        });
+
+        // 4. Security Groups
         const instanceSG = new ec2.SecurityGroup(this, `InstanceSG${regionTag}`, {
             vpc: vpc,
             allowAllOutbound: true,
@@ -47,29 +61,28 @@ export class SingaporeEC2Stack extends cdk.Stack {
         instanceSG.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(22), 'Allow SSH');
         instanceSG.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(80), 'Allow HTTP');
 
-        // Restricted Security Group for isolating compromised instances
         const quarantineSG = new ec2.SecurityGroup(this, `QuarantineSG${regionTag}`, {
             vpc: vpc,
             allowAllOutbound: false,
             securityGroupName: `Quarantine-SG-${regionTag}`,
-            description: 'Isolate compromised instances',
+            description: 'Isolate compromised instances but keep SSM/S3 access via Endpoints',
         });
 
-        // Allow only essential internal HTTPS traffic for forensics and SSM
+        // Allow internal HTTPS traffic for VPC Endpoints
         quarantineSG.addEgressRule(
             ec2.Peer.ipv4(vpc.vpcCidrBlock), 
             ec2.Port.tcp(443), 
-            'Allow internal HTTPS for SSM and S3'
+            'Allow HTTPS for internal VPC Endpoints'
         );
         
-        // Store Quarantine SG ID in SSM for remediation Lambda discovery
+        // Store Quarantine SG ID in SSM
         new ssm.StringParameter(this, 'QuarantineSgParam', {
             parameterName: '/security/quarantine-sg-id',
             stringValue: quarantineSG.securityGroupId,
             description: `Quarantine SG ID for ${regionTag}`,
         });
 
-        // IAM Role allowing EC2 to interact with SSM and upload forensics
+        // 5. IAM Role for EC2
         const ec2Role = new iam.Role(this, `EC2SSMRole${regionTag}`, {
             assumedBy: new iam.ServicePrincipal('ec2.amazonaws.com'),
             managedPolicies: [
@@ -77,21 +90,17 @@ export class SingaporeEC2Stack extends cdk.Stack {
             ],
         });
 
-        // Forensics permissions for RAM dump upload and tool retrieval
         ec2Role.addToPolicy(new iam.PolicyStatement({
             sid: 'AllowForensicsOperations',
             effect: iam.Effect.ALLOW,
-            actions: [
-                's3:PutObject', 
-                's3:GetObject'
-            ],
+            actions: ['s3:PutObject', 's3:GetObject'],
             resources: [
                 `${bucketArn}/forensics/*`,
                 `${bucketArn}/tools/*`
             ],
         }));
 
-        // Vulnerable EC2 instance for security testing
+        // 6. EC2 Instance with UserData for AVML
         const ec2Instance = new ec2.Instance(this, `TestInstance${regionTag}`, {
             instanceName: `Victim-EC2-${regionTag}`,
             vpc: vpc,
@@ -99,25 +108,21 @@ export class SingaporeEC2Stack extends cdk.Stack {
             machineImage: ec2.MachineImage.latestAmazonLinux2023(),
             securityGroup: instanceSG,
             role: ec2Role,
-            vpcSubnets: {
-                subnetType: ec2.SubnetType.PUBLIC,
-            },
+            vpcSubnets: { subnetType: ec2.SubnetType.PUBLIC },
             associatePublicIpAddress: true,
         });
 
-        // CloudFormation Outputs for post-deployment verification
-        new cdk.CfnOutput(this, `InstanceIdOutput${regionTag}`, {
-            value: ec2Instance.instanceId,
-        });
+        // Cập nhật đường dẫn chuẩn /usr/local/bin
+        ec2Instance.addUserData(
+            'sudo yum update -y',
+            'sudo yum install -y wget',
+            'sudo wget https://github.com/microsoft/avml/releases/download/v0.14.0/avml -O /usr/local/bin/avml',
+            'sudo chmod +x /usr/local/bin/avml'
+        );
 
-        new cdk.CfnOutput(this, `VpcIdOutput${regionTag}`, {
-            value: vpc.vpcId,
-            exportName: `${regionTag}-VpcId`, 
-        });
-        
-        new cdk.CfnOutput(this, `QuarantineSGIdOutput${regionTag}`, {
-            value: quarantineSG.securityGroupId,
-            exportName: `${regionTag}-QuarantineSGId`, 
-        });
+        // 7. Outputs
+        new cdk.CfnOutput(this, `InstanceIdOutput${regionTag}`, { value: ec2Instance.instanceId });
+        new cdk.CfnOutput(this, `VpcIdOutput${regionTag}`, { value: vpc.vpcId });
+        new cdk.CfnOutput(this, `QuarantineSGIdOutput${regionTag}`, { value: quarantineSG.securityGroupId });
     }
 }

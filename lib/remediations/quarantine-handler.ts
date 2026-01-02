@@ -6,7 +6,7 @@ import {
     DescribeInstancesCommand, 
     DescribeIamInstanceProfileAssociationsCommand, 
     DisassociateIamInstanceProfileCommand,
-    StopInstancesCommand // Thêm lệnh Stop
+    StopInstancesCommand 
 } from '@aws-sdk/client-ec2';
 import { IAMClient, PutRolePolicyCommand, GetInstanceProfileCommand } from '@aws-sdk/client-iam';
 import { 
@@ -52,14 +52,14 @@ export const handler = async (event: any): Promise<void> => {
                             continue;
                         }
 
-                        // 1. Dump Memory (Bằng chứng quan trọng nhất)
+                        // 1. Dump Memory (Sử dụng AVML trong /usr/local/bin)
                         await runForensicsWorkflow(resourceId, region, bucketName);
 
                         // 2. Cô lập mạng
                         await quarantineNetwork(resourceId, region);
 
                         // 3. Thu hồi quyền IAM & Xóa Sessions
-                        const ssmCount = await terminateSSMSessions(resourceId, region);
+                        await terminateSSMSessions(resourceId, region);
                         await revokeIAMForInstance(resourceId, region);
 
                         // 4. Gỡ bỏ IAM Role khỏi Instance
@@ -68,7 +68,7 @@ export const handler = async (event: any): Promise<void> => {
                         // 5. Tắt máy (Stop Instance) - BƯỚC CUỐI CÙNG
                         await stopInstance(resourceId, region);
 
-                        remediationLog += `- Success: ${resourceId}\n  + Memory Dump: Captured\n  + Security: Isolated\n  + IAM Role: Detached\n  + State: Stopped\n`;
+                        remediationLog += `- Success: ${resourceId}\n  + Memory Dump: Captured via /usr/local/bin/avml\n  + Security: Isolated\n  + IAM Role: Detached\n  + State: Stopped\n`;
                     }
                 }
             }
@@ -89,7 +89,7 @@ export const handler = async (event: any): Promise<void> => {
 
             await securityHubClient.send(new BatchUpdateFindingsV2Command({
                 FindingIdentifiers: ocsfIdentifiers,
-                Comment: "Automated remediation: Forensics captured, role detached, and instance stopped",
+                Comment: "Automated remediation: Forensics captured via /usr/local/bin, role detached, and instance stopped",
                 StatusId: 2,
             }));
         }
@@ -101,18 +101,25 @@ export const handler = async (event: any): Promise<void> => {
 };
 
 /**
- * Forensics workflow: Download AVML, dump memory, and upload to S3
+ * Forensics workflow: Chạy dump memory và upload lên S3
+ * Sử dụng tool tại /usr/local/bin/avml đã được cài qua UserData
  */
 async function runForensicsWorkflow(instanceId: string, region: string, bucketName: string) {
     const ssmClient = new SSMClient({ region });
 
     const forensicsScript = [
         "set -e",
-        "sudo curl -sL -o /usr/local/bin/avml https://github.com/microsoft/avml/releases/download/v0.14.0/avml",
-        "sudo chmod +x /usr/local/bin/avml",
+        // Kiểm tra tool tại /usr/local/bin, nếu chưa có thì mới tải (phòng hờ)
+        "if [ ! -f /usr/local/bin/avml ]; then " +
+            "sudo curl -sL -o /usr/local/bin/avml https://github.com/microsoft/avml/releases/download/v0.14.0/avml && " +
+            "sudo chmod +x /usr/local/bin/avml; " +
+        "fi",
         "sudo mkdir -p /data-forensics && cd /data-forensics",
+        // Thực hiện dump và nén RAM trực tiếp
         "sudo /usr/local/bin/avml --source /proc/kcore --compress mem.raw.xz || sudo /usr/local/bin/avml --compress mem.raw.xz",
+        // Upload bằng chứng lên S3 bucket của vùng tương ứng
         `sudo aws s3 cp mem.raw.xz s3://${bucketName}/forensics/${instanceId}/$(date +%Y%m%d_%H%M%S)_mem.raw.xz`,
+        // Dọn dẹp folder tạm
         "cd / && sudo rm -rf /data-forensics"
     ];
 
@@ -130,12 +137,12 @@ async function runForensicsWorkflow(instanceId: string, region: string, bucketNa
         await new Promise(r => setTimeout(r, 7000));
         const inv = await ssmClient.send(new GetCommandInvocationCommand({ CommandId: commandId, InstanceId: instanceId }));
         status = inv.Status || 'Failed';
-        if (status === 'Failed') throw new Error(`Forensics failed`);
+        if (status === 'Failed') throw new Error(`Forensics failed on instance ${instanceId}`);
     }
 }
 
 /**
- * Network isolation
+ * Network isolation: Gán Security Group cô lập
  */
 async function quarantineNetwork(instanceId: string, region: string) {
     const ssmClient = new SSMClient({ region });
@@ -148,7 +155,7 @@ async function quarantineNetwork(instanceId: string, region: string) {
 }
 
 /**
- * Cleanup sessions
+ * Cleanup sessions: Ngắt các kết nối SSM đang hoạt động
  */
 async function terminateSSMSessions(instanceId: string, region: string): Promise<number> {
     const ssmClient = new SSMClient({ region });
@@ -160,12 +167,12 @@ async function terminateSSMSessions(instanceId: string, region: string): Promise
             await ssmClient.send(new TerminateSessionCommand({ SessionId: session.SessionId! }));
             count++;
         }
-    } catch (e) { console.error("Session error:", e); }
+    } catch (e) { console.error("Session cleanup error:", e); }
     return count;
 }
 
 /**
- * Revoke IAM
+ * Revoke IAM: Vô hiệu hóa các phiên truy cập IAM cũ của Role
  */
 async function revokeIAMForInstance(instanceId: string, region: string) {
     const ec2Client = new EC2Client({ region });
@@ -194,7 +201,7 @@ async function revokeIAMForInstance(instanceId: string, region: string) {
 }
 
 /**
- * Detach IAM Role
+ * Detach IAM Role: Gỡ hoàn toàn Role khỏi EC2
  */
 async function detachIAMRole(instanceId: string, region: string) {
     const ec2Client = new EC2Client({ region });
@@ -206,11 +213,11 @@ async function detachIAMRole(instanceId: string, region: string) {
         if (associationId) {
             await ec2Client.send(new DisassociateIamInstanceProfileCommand({ AssociationId: associationId }));
         }
-    } catch (e) { console.error("Detach error:", e); }
+    } catch (e) { console.error("Detach role error:", e); }
 }
 
 /**
- * Stop Instance (The Final Lockdown)
+ * Stop Instance: Tắt máy để bảo toàn dữ liệu ổ đĩa
  */
 async function stopInstance(instanceId: string, region: string) {
     const ec2Client = new EC2Client({ region });
