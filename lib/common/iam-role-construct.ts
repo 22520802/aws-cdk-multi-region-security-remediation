@@ -39,7 +39,7 @@ export class RemediationLambdaRoleConstruct extends Construct {
             iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole')
         );
 
-        // Core actions for forensics and isolation: EC2 management, SSM commands, and RAM dump upload
+        // Core actions for forensics and isolation
         this.role.addToPolicy(new iam.PolicyStatement({
             sid: 'EC2RemediationActions',
             actions: [
@@ -47,32 +47,34 @@ export class RemediationLambdaRoleConstruct extends Construct {
                 'ec2:DescribeIamInstanceProfileAssociations',
                 'ec2:DisassociateIamInstanceProfile',
                 'ec2:DescribeInstances',
-                'ec2:ModifyInstanceAttribute', // Used for Security Group swapping
+                'ec2:ModifyInstanceAttribute',
                 'ssm:DescribeSessions',
-                'ssm:TerminateSession',       // Used to kick active attackers
-                'iam:PutRolePolicy',          // Used to attach Deny policies
+                'ssm:TerminateSession',
+                'iam:PutRolePolicy',
                 'iam:GetInstanceProfile',
                 'iam:GetRole',
-                'ssm:SendCommand',            // Runs AVML on target instance
+                'ssm:SendCommand',
                 'ssm:GetCommandInvocation',
-                'ssm:GetParameter',
-                's3:PutObject'                // Uploads RAM dump to forensics bucket
+                's3:PutObject'
             ],
             resources: ['*'],
         }));
 
-        // Permission to retrieve the specific Quarantine Security Group ID
+        // --- UPDATED: SSM PARAMETER STORE PERMISSIONS FOR LOCKING ---
         this.role.addToPolicy(new iam.PolicyStatement({
-            sid: 'SSMReadParameter',
-            actions: ['ssm:GetParameter'],
+            sid: 'SSMParameterLockManagement',
+            actions: [
+                'ssm:GetParameter',
+                'ssm:PutParameter',    // Needed to CREATE the lock
+                'ssm:DeleteParameter'  // Needed to CLEANUP the lock
+            ],
             resources: [
-                `arn:aws:ssm:*:*:parameter/security/quarantine-sg-id`,
-                `arn:aws:ssm:*:*:parameter/security/forensics-bucket-name`,
-                `arn:aws:ssm:*:*:parameter/security/config-bucket-arn-*`    
+                `arn:aws:ssm:*:*:parameter/security/*`,
+                `arn:aws:ssm:*:*:parameter/security/lock/*`
             ],
         }));
 
-        // Permission to update Security Hub finding status to RESOLVED
+        // Permission to update Security Hub finding status
         this.role.addToPolicy(new iam.PolicyStatement({
             sid: 'SecurityHubUpdate',
             actions: [

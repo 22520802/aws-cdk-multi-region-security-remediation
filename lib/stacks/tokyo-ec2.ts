@@ -26,7 +26,7 @@ export class TokyoEC2Stack extends cdk.Stack {
 
         // 2. VPC Configuration (10.2.0.0/16 for Tokyo)
         const vpc = new ec2.Vpc(this, `Vpc${regionTag}`, {
-            maxAzs: 2, 
+            maxAzs: 1, 
             ipAddresses: ec2.IpAddresses.cidr('10.2.0.0/16'),
             vpcName: `${regionTag}-VPC`,
             natGateways: 1, 
@@ -58,7 +58,6 @@ export class TokyoEC2Stack extends cdk.Stack {
             allowAllOutbound: true,
             securityGroupName: `Web-SG-${regionTag}`,
         });
-        instanceSG.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(22), 'Allow SSH');
         instanceSG.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(80), 'Allow HTTP');
 
         const quarantineSG = new ec2.SecurityGroup(this, `QuarantineSG${regionTag}`, {
@@ -91,10 +90,9 @@ export class TokyoEC2Stack extends cdk.Stack {
         ec2Role.addToPolicy(new iam.PolicyStatement({
             sid: 'AllowForensicsOperations',
             effect: iam.Effect.ALLOW,
-            actions: ['s3:PutObject', 's3:GetObject'],
+            actions: ['s3:PutObject'],
             resources: [
-                `${bucketArn}/forensics/*`,
-                `${bucketArn}/tools/*`
+                `${bucketArn}/forensics/*`
             ],
         }));
 
@@ -106,8 +104,8 @@ export class TokyoEC2Stack extends cdk.Stack {
             machineImage: ec2.MachineImage.latestAmazonLinux2023(),
             securityGroup: instanceSG,
             role: ec2Role,
-            vpcSubnets: { subnetType: ec2.SubnetType.PUBLIC },
-            associatePublicIpAddress: true,
+            vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+            associatePublicIpAddress: false,
         });
 
         // Cập nhật đường dẫn chuẩn /usr/local/bin

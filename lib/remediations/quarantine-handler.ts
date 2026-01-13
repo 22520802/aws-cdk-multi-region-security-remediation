@@ -1,125 +1,152 @@
 import { PublishCommand, SNSClient } from '@aws-sdk/client-sns';
 import { SecurityHubClient, BatchUpdateFindingsV2Command } from '@aws-sdk/client-securityhub';
 import { 
-    EC2Client, 
-    ModifyInstanceAttributeCommand, 
-    DescribeInstancesCommand, 
-    DescribeIamInstanceProfileAssociationsCommand, 
-    DisassociateIamInstanceProfileCommand,
-    StopInstancesCommand 
+    EC2Client, ModifyInstanceAttributeCommand, DescribeInstancesCommand, 
+    DescribeIamInstanceProfileAssociationsCommand, DisassociateIamInstanceProfileCommand 
 } from '@aws-sdk/client-ec2';
 import { IAMClient, PutRolePolicyCommand, GetInstanceProfileCommand } from '@aws-sdk/client-iam';
 import { 
-    SSMClient, 
-    GetParameterCommand, 
-    TerminateSessionCommand, 
-    DescribeSessionsCommand, 
-    SendCommandCommand, 
-    GetCommandInvocationCommand 
+    SSMClient, GetParameterCommand, PutParameterCommand, TerminateSessionCommand, 
+    DescribeSessionsCommand, SendCommandCommand, GetCommandInvocationCommand 
 } from '@aws-sdk/client-ssm';
+import * as crypto from 'crypto';
 
 const SNS_TOPIC_ARN = process.env.SNS_TOPIC_ARN;
+const APPROVAL_URL_BASE = process.env.APPROVAL_URL_BASE;
+const SIGNING_SECRET = process.env.SIGNING_SECRET || 'secret-key-change-me';
+
 const snsClient = new SNSClient({});
 const securityHubClient = new SecurityHubClient({});
 
+/** Orchestrates forensics, network isolation, and sends approval notification */
 export const handler = async (event: any): Promise<void> => {
     try {
         const findings = event.detail.findings;
         if (!findings || findings.length === 0) return;
 
-        const ocsfIdentifiers: any[] = [];
-        let remediationLog = "";
+        const resourceMap = new Map<string, any[]>();
+        const allFindingIdentifiers: any[] = [];
 
+        // Map findings to specific EC2 instances
         for (const finding of findings) {
-            const region = finding.cloud?.region || "ap-southeast-1";
-            const ssmClient = new SSMClient({ region });
-            
-            if (finding.resources && Array.isArray(finding.resources)) {
-                for (const resource of finding.resources) {
-                    const resourceId = resource.uid;
-                    const resourceType = resource.type;
-
-                    if (resourceType === 'AWS::EC2::Instance' && resourceId) {
-                        console.log(`Remediation start: ${resourceId} in ${region}`);
-
-                        const getParam = await ssmClient.send(new GetParameterCommand({ 
-                            Name: '/security/forensics-bucket-name' 
-                        }));
-                        const bucketName = getParam.Parameter?.Value;
-
-                        if (!bucketName) {
-                            console.error(`Skip: Bucket name missing for ${region}`);
-                            continue;
-                        }
-
-                        // 1. Dump Memory (Sử dụng AVML trong /usr/local/bin)
-                        await runForensicsWorkflow(resourceId, region, bucketName);
-
-                        // 2. Cô lập mạng
-                        await quarantineNetwork(resourceId, region);
-
-                        // 3. Thu hồi quyền IAM & Xóa Sessions
-                        await terminateSSMSessions(resourceId, region);
-                        await revokeIAMForInstance(resourceId, region);
-
-                        // 4. Gỡ bỏ IAM Role khỏi Instance
-                        await detachIAMRole(resourceId, region);
-
-                        // 5. Tắt máy (Stop Instance) - BƯỚC CUỐI CÙNG
-                        await stopInstance(resourceId, region);
-
-                        remediationLog += `- Success: ${resourceId}\n  + Memory Dump: Captured via /usr/local/bin/avml\n  + Security: Isolated\n  + IAM Role: Detached\n  + State: Stopped\n`;
-                    }
-                }
-            }
-
-            ocsfIdentifiers.push({
+            allFindingIdentifiers.push({
                 CloudAccountUid: finding.cloud?.account?.uid,
                 FindingInfoUid: finding.finding_info?.uid,
                 MetadataProductUid: finding.metadata?.product?.uid,
             });
+
+            const instanceId = finding.resources?.find((r: any) => r.type === 'AWS::EC2::Instance')?.uid;
+            if (instanceId) {
+                if (!resourceMap.has(instanceId)) resourceMap.set(instanceId, []);
+                resourceMap.get(instanceId)?.push(finding);
+            }
         }
 
-        if (remediationLog) {
-            await snsClient.send(new PublishCommand({
-                TopicArn: SNS_TOPIC_ARN,
-                Subject: `Security Remediation Completed`,
-                Message: `Details:\n${remediationLog}`,
+        for (const [instanceId, instanceFindings] of resourceMap) {
+            const firstFinding = instanceFindings[0];
+            const region = firstFinding.cloud?.region || "ap-southeast-1";
+            const ssmClient = new SSMClient({ region });
+            const ec2Client = new EC2Client({ region });
+            const lockKey = `/security/lock/${instanceId}`;
+
+            // Check and set distributed lock via SSM
+            try {
+                await ssmClient.send(new GetParameterCommand({ Name: lockKey }));
+                console.log(`Instance ${instanceId} is LOCKED. Skipping duplicate.`);
+                continue; 
+            } catch (err: any) {
+                if (err.name !== 'ParameterNotFound') throw err;
+            }
+
+            await ssmClient.send(new PutParameterCommand({
+                Name: lockKey, Value: 'PENDING_APPROVAL', Type: 'String', Overwrite: true
             }));
 
+            // Collect instance and environment metadata
+            const desc = await ec2Client.send(new DescribeInstancesCommand({ InstanceIds: [instanceId] }));
+            const instanceData = desc.Reservations?.[0]?.Instances?.[0];
+            const instanceName = instanceData?.Tags?.find((tag: any) => tag.Key === 'Name')?.Value || 'Unknown-Instance';
+
+            const getParam = await ssmClient.send(new GetParameterCommand({ Name: '/security/forensics-bucket-name' }));
+            const bucketName = getParam.Parameter?.Value;
+
+            if (bucketName) {
+                console.log(`Remediation start: ${instanceId} (${instanceName})`);
+
+                await runForensicsWorkflow(instanceId, region, bucketName, instanceName);
+                await quarantineNetwork(instanceId, region);
+                await terminateSSMSessions(instanceId, region);
+                await revokeIAMForInstance(instanceId, region);
+                await detachIAMRole(instanceId, region);
+                
+                const approvalLink = generateApprovalLink(instanceId, region);
+                const timeICT = new Date().toLocaleString('en-US', { timeZone: 'Asia/Ho_Chi_Minh', hour12: true });
+                
+                await snsClient.send(new PublishCommand({
+                    TopicArn: SNS_TOPIC_ARN,
+                    Subject: `[APPROVAL REQUIRED] Incident Containment - ${instanceName} (${instanceId})`,
+                    Message: `
+AWS SECURITY INCIDENT RESPONSE REPORT
+==========================================
+Status: ISOLATED & WAITING FOR DECISION
+Time (ICT): ${timeICT}
+Instance: ${instanceName} (${instanceId})
+Region: ${region}
+
+AUTOMATED ACTIONS TAKEN:
+[v] Forensics memory dump captured
+[v] Network isolated (Quarantine SG)
+[v] IAM Role detached & Sessions revoked
+
+PENDING ACTION:
+The instance is currently running in isolation. 
+To STOP this instance (finalize containment), please click the link below:
+
+>>> CLICK TO STOP INSTANCE:
+${approvalLink}
+
+(Link valid for 24 hours)
+==========================================
+`
+                }));
+            }
+        }
+
+        // Update Security Hub finding status to Resolved
+        if (allFindingIdentifiers.length > 0) {
             await securityHubClient.send(new BatchUpdateFindingsV2Command({
-                FindingIdentifiers: ocsfIdentifiers,
-                Comment: "Automated remediation: Forensics captured via /usr/local/bin, role detached, and instance stopped",
-                StatusId: 2,
+                FindingIdentifiers: allFindingIdentifiers,
+                Comment: "Automated isolation completed. Pending human approval for shutdown.",
+                StatusId: 2, 
             }));
         }
-
     } catch (error) {
         console.error('Fatal error:', error);
         throw error;
     }
 };
 
-/**
- * Forensics workflow: Chạy dump memory và upload lên S3
- * Sử dụng tool tại /usr/local/bin/avml đã được cài qua UserData
- */
-async function runForensicsWorkflow(instanceId: string, region: string, bucketName: string) {
+/** Generates a signed URL for approval Lambda */
+function generateApprovalLink(instanceId: string, region: string): string {
+    if (!APPROVAL_URL_BASE) return "ERROR: Approval URL not configured";
+    const expires = Date.now() + (24 * 60 * 60 * 1000);
+    const signature = crypto.createHmac('sha256', SIGNING_SECRET)
+                            .update(`${instanceId}:${region}:${expires}`)
+                            .digest('hex');
+    return `${APPROVAL_URL_BASE}?instanceId=${instanceId}&region=${region}&expires=${expires}&signature=${signature}`;
+}
+
+/** Executes AVML memory dump and uploads to S3 */
+async function runForensicsWorkflow(instanceId: string, region: string, bucketName: string, instanceName: string) {
     const ssmClient = new SSMClient({ region });
+    const s3Path = `s3://${bucketName}/forensics/${instanceName}/${instanceId}/$(date +%Y%m%d_%H%M%S)_mem.raw.xz`;
 
     const forensicsScript = [
         "set -e",
-        // Kiểm tra tool tại /usr/local/bin, nếu chưa có thì mới tải (phòng hờ)
-        "if [ ! -f /usr/local/bin/avml ]; then " +
-            "sudo curl -sL -o /usr/local/bin/avml https://github.com/microsoft/avml/releases/download/v0.14.0/avml && " +
-            "sudo chmod +x /usr/local/bin/avml; " +
-        "fi",
+        "if [ ! -f /usr/local/bin/avml ]; then sudo curl -sL -o /usr/local/bin/avml https://github.com/microsoft/avml/releases/download/v0.14.0/avml && sudo chmod +x /usr/local/bin/avml; fi",
         "sudo mkdir -p /data-forensics && cd /data-forensics",
-        // Thực hiện dump và nén RAM trực tiếp
         "sudo /usr/local/bin/avml --source /proc/kcore --compress mem.raw.xz || sudo /usr/local/bin/avml --compress mem.raw.xz",
-        // Upload bằng chứng lên S3 bucket của vùng tương ứng
-        `sudo aws s3 cp mem.raw.xz s3://${bucketName}/forensics/${instanceId}/$(date +%Y%m%d_%H%M%S)_mem.raw.xz`,
-        // Dọn dẹp folder tạm
+        `sudo aws s3 cp mem.raw.xz ${s3Path}`,
         "cd / && sudo rm -rf /data-forensics"
     ];
 
@@ -141,22 +168,20 @@ async function runForensicsWorkflow(instanceId: string, region: string, bucketNa
     }
 }
 
-/**
- * Network isolation: Gán Security Group cô lập
- */
+/** Attaches the Quarantine Security Group to instance */
 async function quarantineNetwork(instanceId: string, region: string) {
     const ssmClient = new SSMClient({ region });
     const ec2Client = new EC2Client({ region });
     const getParam = await ssmClient.send(new GetParameterCommand({ Name: '/security/quarantine-sg-id' }));
-    const quarantineSgId = getParam.Parameter?.Value;
-    if (quarantineSgId) {
-        await ec2Client.send(new ModifyInstanceAttributeCommand({ InstanceId: instanceId, Groups: [quarantineSgId] }));
+    if (getParam.Parameter?.Value) {
+        await ec2Client.send(new ModifyInstanceAttributeCommand({ 
+            InstanceId: instanceId, 
+            Groups: [getParam.Parameter.Value] 
+        }));
     }
 }
 
-/**
- * Cleanup sessions: Ngắt các kết nối SSM đang hoạt động
- */
+/** Terminates all active SSM sessions for instance */
 async function terminateSSMSessions(instanceId: string, region: string): Promise<number> {
     const ssmClient = new SSMClient({ region });
     let count = 0;
@@ -171,9 +196,7 @@ async function terminateSSMSessions(instanceId: string, region: string): Promise
     return count;
 }
 
-/**
- * Revoke IAM: Vô hiệu hóa các phiên truy cập IAM cũ của Role
- */
+/** Applies inline Deny policy to instance role */
 async function revokeIAMForInstance(instanceId: string, region: string) {
     const ec2Client = new EC2Client({ region });
     const iamClient = new IAMClient({ region });
@@ -200,9 +223,7 @@ async function revokeIAMForInstance(instanceId: string, region: string) {
     } catch (e) { console.error("IAM revoke error:", e); }
 }
 
-/**
- * Detach IAM Role: Gỡ hoàn toàn Role khỏi EC2
- */
+/** Detaches IAM role profile from the instance */
 async function detachIAMRole(instanceId: string, region: string) {
     const ec2Client = new EC2Client({ region });
     try {
@@ -214,20 +235,4 @@ async function detachIAMRole(instanceId: string, region: string) {
             await ec2Client.send(new DisassociateIamInstanceProfileCommand({ AssociationId: associationId }));
         }
     } catch (e) { console.error("Detach role error:", e); }
-}
-
-/**
- * Stop Instance: Tắt máy để bảo toàn dữ liệu ổ đĩa
- */
-async function stopInstance(instanceId: string, region: string) {
-    const ec2Client = new EC2Client({ region });
-    try {
-        console.log(`Stopping instance: ${instanceId}`);
-        await ec2Client.send(new StopInstancesCommand({
-            InstanceIds: [instanceId]
-        }));
-        console.log(`Instance ${instanceId} stopped successfully.`);
-    } catch (e) {
-        console.error("Stop instance error:", e);
-    }
 }

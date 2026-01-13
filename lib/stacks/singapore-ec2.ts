@@ -26,7 +26,7 @@ export class SingaporeEC2Stack extends cdk.Stack {
 
         // 2. VPC Configuration
         const vpc = new ec2.Vpc(this, `Vpc${regionTag}`, {
-            maxAzs: 2, 
+            maxAzs: 1, 
             ipAddresses: ec2.IpAddresses.cidr('10.1.0.0/16'),
             vpcName: `${regionTag}-VPC`,
             natGateways: 1, 
@@ -93,10 +93,9 @@ export class SingaporeEC2Stack extends cdk.Stack {
         ec2Role.addToPolicy(new iam.PolicyStatement({
             sid: 'AllowForensicsOperations',
             effect: iam.Effect.ALLOW,
-            actions: ['s3:PutObject', 's3:GetObject'],
+            actions: ['s3:PutObject'],
             resources: [
-                `${bucketArn}/forensics/*`,
-                `${bucketArn}/tools/*`
+                `${bucketArn}/forensics/*`
             ],
         }));
 
@@ -108,8 +107,8 @@ export class SingaporeEC2Stack extends cdk.Stack {
             machineImage: ec2.MachineImage.latestAmazonLinux2023(),
             securityGroup: instanceSG,
             role: ec2Role,
-            vpcSubnets: { subnetType: ec2.SubnetType.PUBLIC },
-            associatePublicIpAddress: true,
+            vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+            associatePublicIpAddress: false,
         });
 
         // Cập nhật đường dẫn chuẩn /usr/local/bin
